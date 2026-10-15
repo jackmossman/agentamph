@@ -29,18 +29,22 @@ function Remove-CriticalMark([string]$SessionId, [string]$Directory = (Get-Marks
 
 # A process keeps its pid and start time when /clear or compaction gives it a new
 # session id. $KnownByProcess maps "pid:procStart" to the last session id seen, and
-# a mark on the old id moves to the new one. Returns $true when the map changed.
+# a mark on the old id moves to the new one. When another live process still reports
+# the old id (one conversation open twice), the mark is copied instead, so that
+# process keeps it. Returns $true when the map changed.
 function Update-MarksForSessionChanges {
     param($Sessions, [hashtable]$KnownByProcess, [string]$Directory = (Get-MarksDirectory))
     $changed = $false
     $marks = Get-CriticalMarks $Directory
+    $liveIds = @{}
+    foreach ($session in $Sessions) { $liveIds[$session.SessionId] = $true }
     foreach ($session in $Sessions) {
         if ($session.Fallback) { continue }
         $key = "$($session.Pid):$($session.ProcStart)"
         $previous = $KnownByProcess[$key]
         if ($previous -and $previous -ne $session.SessionId -and $marks.ContainsKey($previous)) {
             Set-CriticalMark $session.SessionId $Directory
-            Remove-CriticalMark $previous $Directory
+            if (-not $liveIds.ContainsKey($previous)) { Remove-CriticalMark $previous $Directory }
         }
         if ($previous -ne $session.SessionId) { $KnownByProcess[$key] = $session.SessionId; $changed = $true }
     }

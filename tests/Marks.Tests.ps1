@@ -39,6 +39,33 @@ Describe 'critical marks' {
         $marks.ContainsKey('old-id') | Should -BeFalse
     }
 
+    It 'copies the mark when another process still has the old session id' {
+        $known = @{}
+        Set-CriticalMark 'shared-id' $dir
+        $before = @(
+            New-TestSession 'shared-id' -ProcessId 100 -ProcStart '1'
+            New-TestSession 'shared-id' -ProcessId 200 -ProcStart '2'
+        )
+        Update-MarksForSessionChanges -Sessions $before -KnownByProcess $known -Directory $dir | Out-Null
+        $after = @(
+            New-TestSession 'shared-id' -ProcessId 100 -ProcStart '1'
+            New-TestSession 'cleared-id' -ProcessId 200 -ProcStart '2'
+        )
+        Update-MarksForSessionChanges -Sessions $after -KnownByProcess $known -Directory $dir | Out-Null
+        $marks = Get-CriticalMarks $dir
+        $marks.ContainsKey('shared-id') | Should -BeTrue
+        $marks.ContainsKey('cleared-id') | Should -BeTrue
+
+        $last = @(
+            New-TestSession 'second-clear-id' -ProcessId 100 -ProcStart '1'
+            New-TestSession 'cleared-id' -ProcessId 200 -ProcStart '2'
+        )
+        Update-MarksForSessionChanges -Sessions $last -KnownByProcess $known -Directory $dir | Out-Null
+        $marks = Get-CriticalMarks $dir
+        $marks.ContainsKey('shared-id') | Should -BeFalse
+        $marks.ContainsKey('second-clear-id') | Should -BeTrue
+    }
+
     It 'does not mark the new id when the old one was not marked' {
         $known = @{ '7:9' = 'old-id' }
         Update-MarksForSessionChanges -Sessions @(New-TestSession 'new-id' -ProcessId 7 -ProcStart '9') -KnownByProcess $known -Directory $dir | Out-Null
