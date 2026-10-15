@@ -1,0 +1,7 @@
+# Plans are private working notes.
+plans/
+
+# OS and editor clutter.
+Thumbs.db
+Desktop.ini
+.vs/

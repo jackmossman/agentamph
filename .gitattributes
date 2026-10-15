@@ -1,0 +1,7 @@
+# Store and check out every text file with LF, overriding core.autocrlf.
+* text=auto eol=lf
+
+# Binary files.
+*.png binary
+*.gif binary
+*.ico binary
