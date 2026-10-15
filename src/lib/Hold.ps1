@@ -25,3 +25,9 @@ function Get-HoldingSessions {
     }
     , $holding
 }
+
+# One conversation can be open in two Claude processes (for example VS Code and the
+# CLI), both reporting the same session id. Counts sessions, not processes.
+function Get-SessionCount($Sessions) {
+    @($Sessions | ForEach-Object { $_.SessionId } | Sort-Object -Unique).Count
+}

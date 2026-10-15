@@ -79,7 +79,7 @@ function Get-ModeLabel {
 }
 
 function Update-TrayIcon {
-    $count = @($script:holding).Count
+    $count = Get-SessionCount $script:holding
     $handle = New-AgentampIconHandle ($count -gt 0) $count ([System.Windows.Forms.SystemInformation]::SmallIconSize.Width)
     $script:notifyIcon.Icon = [System.Drawing.Icon]::FromHandle($handle)
     Remove-IconHandle $script:iconHandle
@@ -112,7 +112,7 @@ function Invoke-Refresh([bool]$Force) {
     $holdNow = @($script:holding).Count -gt 0
     Set-KeepAwake $holdNow $script:settings.KeepDisplayOn
 
-    $holdKey = "$(@($script:holding).Count)|$($script:unrecognised)|$(Get-ModeLabel)"
+    $holdKey = "$(Get-SessionCount $script:holding)|$($script:unrecognised)|$(Get-ModeLabel)"
     if ($Force -or $holdKey -ne $script:lastHoldKey) {
         $script:lastHoldKey = $holdKey
         Update-TrayIcon
@@ -157,7 +157,7 @@ function Get-SessionLabel($Session) {
 
 function Update-Menu {
     $script:menu.Items.Clear()
-    $count = @($script:holding).Count
+    $count = Get-SessionCount $script:holding
     $header = New-MenuItem "agentamph: $count holding" $null $false $null
     $header.Enabled = $false
     [void]$script:menu.Items.Add($header)

@@ -50,6 +50,16 @@ Describe 'Get-HoldingSessions' {
     }
 }
 
+Describe 'Get-SessionCount' {
+    It 'counts a conversation open in two processes once' {
+        $sessions = @((New-TestSession 'shared' -ProcessId 1), (New-TestSession 'shared' -ProcessId 2), (New-TestSession 'other' -ProcessId 3))
+        Get-SessionCount $sessions | Should -Be 2
+    }
+    It 'counts nothing as zero' {
+        Get-SessionCount @() | Should -Be 0
+    }
+}
+
 Describe 'Update-LastBusy' {
     It 'records busy sessions and forgets gone ones' {
         $last = @{ gone = [datetime]'2026-01-01' }
