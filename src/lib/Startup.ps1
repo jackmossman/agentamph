@@ -2,7 +2,7 @@
 # under the per-user Run key, and the named handles that let an installer or
 # uninstaller ask a running app to exit. Environment overrides exist for tests.
 
-$script:AgentampVersion = '0.0.4'
+$script:AgentampVersion = '1.0.0'
 $script:TrayMutexName = if ($env:AGENTAMPH_TRAY_MUTEX) { $env:AGENTAMPH_TRAY_MUTEX } else { 'Local\agentamph-tray' }
 $script:TrayExitEventName = "$($script:TrayMutexName)-exit"
 

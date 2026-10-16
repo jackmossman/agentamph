@@ -1,6 +1,6 @@
 {
   "name": "agentamph",
-  "version": "0.0.4",
+  "version": "1.0.0",
   "description": "Start a prompt with \"this session is critical\" to mark the session critical in the agentamph tray app, which keeps Windows awake while it runs.",
   "author": { "name": "Jack Mossman" },
   "homepage": "https://github.com/jackmossman/agentamph",

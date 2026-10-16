@@ -1,5 +1,5 @@
 # Builds the release zip: agentamph-<version>.zip holding one folder with
-# install.ps1, uninstall.ps1, the app under src\, and INSTALL.txt.
+# install.ps1, uninstall.ps1, the app under src\, LICENSE, and INSTALL.txt.
 
 param([string]$OutDir = (Join-Path $PSScriptRoot '..\dist'))
 
@@ -13,7 +13,7 @@ $folder = Join-Path $stage $name
 New-Item -ItemType Directory -Path $folder -Force | Out-Null
 try {
     Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination $folder -Recurse
-    foreach ($file in 'install.ps1', 'uninstall.ps1') { Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $folder }
+    foreach ($file in 'install.ps1', 'uninstall.ps1', 'LICENSE') { Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $folder }
     $instructions = @"
 agentamph $($script:AgentampVersion)
 Keeps Windows awake for the Claude Code sessions you choose.

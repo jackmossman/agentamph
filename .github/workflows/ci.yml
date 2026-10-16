@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      # Includes the checks that every text file uses LF (CRLF for *.cmd), that no
+      # script outside the installer touches the network, and that the plugin hook
+      # keeps no prompt text.
+      - name: Pester suite (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\scripts\test.ps1
+
+      - name: PSScriptAnalyzer (no errors)
+        shell: powershell
+        run: |
+          $errors = @(Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error)
+          $errors | Format-Table RuleName, ScriptName, Line, Message -AutoSize -Wrap
+          if ($errors.Count -gt 0) { throw "PSScriptAnalyzer found $($errors.Count) error(s)." }
+
+      - name: Install Claude Code
+        shell: powershell
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          claude --version
+
+      - name: Validate the marketplace and the plugin
+        shell: powershell
+        run: |
+          claude plugin validate --strict .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          claude plugin validate --strict .\plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

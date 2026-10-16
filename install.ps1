@@ -47,59 +47,66 @@ function Install-Agentamph {
     param([string]$Source, [string]$InstallDir, [string]$StartMenuDir, [string]$UninstallKey, [bool]$NoStart, [string]$ScriptRoot)
     $ErrorActionPreference = 'Stop'
 
+    $download = $null
     if (-not $Source) {
-        $Source = if ($ScriptRoot -and (Test-Path -LiteralPath (Join-Path $ScriptRoot 'src\tray.ps1'))) { $ScriptRoot } else { Get-AgentampDownload }
+        if ($ScriptRoot -and (Test-Path -LiteralPath (Join-Path $ScriptRoot 'src\tray.ps1'))) { $Source = $ScriptRoot }
+        else { $Source = Get-AgentampDownload; $download = Split-Path -Parent $Source }
     }
-    $sourceApp = Join-Path $Source 'src'
-    . (Join-Path $sourceApp 'lib\Startup.ps1')
-    . (Join-Path $sourceApp 'lib\Icons.ps1')
+    try {
+        $sourceApp = Join-Path $Source 'src'
+        . (Join-Path $sourceApp 'lib\Startup.ps1')
+        . (Join-Path $sourceApp 'lib\Icons.ps1')
 
-    $firstInstall = -not (Test-Path -LiteralPath $UninstallKey)
-    if (-not (Stop-TrayApp)) { throw 'agentamph is still running. Choose Exit from its tray menu, then run the install again.' }
+        $firstInstall = -not (Test-Path -LiteralPath $UninstallKey)
+        if (-not (Stop-TrayApp)) { throw 'agentamph is still running. Choose Exit from its tray menu, then run the install again.' }
 
-    # Replace the program files. Settings and marks live elsewhere and are untouched.
-    if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -Path (Join-Path $sourceApp '*') -Destination $InstallDir -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $Source 'uninstall.ps1') -Destination $InstallDir -Force
-    Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Unblock-File
-    $icon = Join-Path $InstallDir 'agentamph.ico'
-    Save-AgentampIconFile $icon
-    $tray = Join-Path $InstallDir 'tray.ps1'
+        # Replace the program files. Settings and marks live elsewhere and are untouched.
+        if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        Copy-Item -Path (Join-Path $sourceApp '*') -Destination $InstallDir -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $Source 'uninstall.ps1') -Destination $InstallDir -Force
+        Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Unblock-File
+        $icon = Join-Path $InstallDir 'agentamph.ico'
+        Save-AgentampIconFile $icon
+        $tray = Join-Path $InstallDir 'tray.ps1'
 
-    if (-not (Test-Path -LiteralPath $StartMenuDir)) { New-Item -ItemType Directory -Path $StartMenuDir -Force | Out-Null }
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut((Join-Path $StartMenuDir 'agentamph.lnk'))
-    $shortcut.TargetPath = Get-ConhostPath
-    $shortcut.Arguments = Get-LaunchArguments $tray
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.IconLocation = "$icon,0"
-    $shortcut.WindowStyle = 7
-    $shortcut.Description = 'Keep Windows awake for the Claude Code sessions you choose'
-    $shortcut.Save()
+        if (-not (Test-Path -LiteralPath $StartMenuDir)) { New-Item -ItemType Directory -Path $StartMenuDir -Force | Out-Null }
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut((Join-Path $StartMenuDir 'agentamph.lnk'))
+        $shortcut.TargetPath = Get-ConhostPath
+        $shortcut.Arguments = Get-LaunchArguments $tray
+        $shortcut.WorkingDirectory = $InstallDir
+        $shortcut.IconLocation = "$icon,0"
+        $shortcut.WindowStyle = 7
+        $shortcut.Description = 'Keep Windows awake for the Claude Code sessions you choose'
+        $shortcut.Save()
 
-    $uninstall = Join-Path $InstallDir 'uninstall.ps1'
-    $size = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1KB)
-    New-Item -Path $UninstallKey -Force | Out-Null
-    $values = [ordered]@{
-        DisplayName     = 'agentamph'
-        DisplayVersion  = $script:AgentampVersion
-        Publisher       = 'Jack Mossman'
-        DisplayIcon     = $icon
-        InstallLocation = $InstallDir
-        URLInfoAbout    = 'https://github.com/jackmossman/agentamph'
-        UninstallString = "`"$(Get-PowerShellPath)`" -NoProfile -ExecutionPolicy Bypass -File `"$uninstall`""
+        $uninstall = Join-Path $InstallDir 'uninstall.ps1'
+        $size = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1KB)
+        New-Item -Path $UninstallKey -Force | Out-Null
+        $values = [ordered]@{
+            DisplayName     = 'agentamph'
+            DisplayVersion  = $script:AgentampVersion
+            Publisher       = 'Jack Mossman'
+            DisplayIcon     = $icon
+            InstallLocation = $InstallDir
+            URLInfoAbout    = 'https://github.com/jackmossman/agentamph'
+            UninstallString = "`"$(Get-PowerShellPath)`" -NoProfile -ExecutionPolicy Bypass -File `"$uninstall`""
+        }
+        foreach ($name in $values.Keys) { Set-ItemProperty -LiteralPath $UninstallKey -Name $name -Value $values[$name] -Type String }
+        foreach ($name in 'NoModify', 'NoRepair') { Set-ItemProperty -LiteralPath $UninstallKey -Name $name -Value 1 -Type DWord }
+        Set-ItemProperty -LiteralPath $UninstallKey -Name 'EstimatedSize' -Value $size -Type DWord
+
+        # A first install turns on start at login. A reinstall keeps the user's choice,
+        # pointing an existing value at the new copy.
+        if ($firstInstall -or (Test-StartAtLogin)) { Set-StartAtLogin $true $tray }
+
+        if (-not $NoStart) { Start-TrayApp $tray }
+        Write-Host "agentamph $($script:AgentampVersion) is installed in $InstallDir and running in the notification area."
+    } finally {
+        # The one-line install's download is only needed until the copy is made.
+        if ($download -and (Test-Path -LiteralPath $download)) { Remove-Item -LiteralPath $download -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    foreach ($name in $values.Keys) { Set-ItemProperty -LiteralPath $UninstallKey -Name $name -Value $values[$name] -Type String }
-    foreach ($name in 'NoModify', 'NoRepair') { Set-ItemProperty -LiteralPath $UninstallKey -Name $name -Value 1 -Type DWord }
-    Set-ItemProperty -LiteralPath $UninstallKey -Name 'EstimatedSize' -Value $size -Type DWord
-
-    # A first install turns on start at login. A reinstall keeps the user's choice,
-    # pointing an existing value at the new copy.
-    if ($firstInstall -or (Test-StartAtLogin)) { Set-StartAtLogin $true $tray }
-
-    if (-not $NoStart) { Start-TrayApp $tray }
-    Write-Host "agentamph $($script:AgentampVersion) is installed in $InstallDir and running in the notification area."
 }
 
 Install-Agentamph -Source $Source -InstallDir $InstallDir -StartMenuDir $StartMenuDir -UninstallKey $UninstallKey -NoStart $NoStart.IsPresent -ScriptRoot $PSScriptRoot

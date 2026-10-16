@@ -14,7 +14,7 @@
 
 param(
     # Strings, split on commas: under -File, "-Scenario 1,3" arrives as one string.
-    [string[]]$Scenario = @('1', '2', '3', '4', '5', '6', '7', '8'),
+    [string[]]$Scenario = @('1', '2', '3', '4', '5', '6', '7', '8', '9'),
     [ValidateSet('None', 'NoHeadless', 'UninstallKeepsRun')][string]$Fault = 'None'
 )
 
@@ -22,8 +22,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VmLib.ps1')
 Assert-VmPrerequisites -NeedCheckpoint
 $requested = @($Scenario -split ',' | Where-Object { $_.Trim() } | ForEach-Object { [int]$_.Trim() })
-$unknown = @($requested | Where-Object { $_ -notin 1..8 })
-if ($unknown) { throw "No scenario $($unknown -join ', '). Scenarios are 1 to 8." }
+$unknown = @($requested | Where-Object { $_ -notin 1..9 })
+if ($unknown) { throw "No scenario $($unknown -join ', '). Scenarios are 1 to 9." }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $script:ResultsDir = Join-Path $PSScriptRoot ("results\" + (Get-Date).ToString('yyyyMMdd-HHmmss'))
@@ -449,9 +449,91 @@ Set-ItemProperty $key ActiveHoursStart 6 -Type DWord; Set-ItemProperty $key Acti
     }
 }
 
+# The commands as the README gives them, so scenario 9 follows only the README.
+function Get-ReadmeCommand([string]$Heading) {
+    $lines = @(Get-Content -LiteralPath (Join-Path $repo 'README.md'))
+    $at = [array]::IndexOf($lines, $Heading)
+    if ($at -lt 0) { throw "README.md has no '$Heading' section." }
+    $start = $null
+    for ($i = $at + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -eq '```powershell') { $start = $i + 1; continue }
+        if ($null -ne $start -and $lines[$i] -eq '```') { return ($lines[$start..($i - 1)] -join "`n") }
+    }
+    throw "README.md's '$Heading' section has no PowerShell block."
+}
+
+function Invoke-Scenario9 {
+    Start-Scenario 9 'fresh machine, following only the README'
+    Restore-CleanVm
+    $before = Get-GuestActiveHours
+    $version = [regex]::Match((Get-Content -LiteralPath (Join-Path $repo 'src\lib\Startup.ps1') -Raw), "AgentampVersion = '([^']+)'").Groups[1].Value
+
+    $install = Get-ReadmeCommand '## Install'
+    $result = Invoke-Watched 9 '9-install' { Invoke-OnDesktop $install 300 }
+    Add-Check 9 'README install command finished' ($result.Output -match 'is installed in') (($result.Output -split "`r?`n" | Where-Object { $_ }) -join ' / ')
+    $reg = Get-TesterRegistry
+    Add-Check 9 'installed the published release of this version' ($reg.DisplayVersion -eq $version) "DisplayVersion $($reg.DisplayVersion), repository $version"
+    Test-Installed 9
+
+    # One simulated session, not yet critical.
+    $sessionId = [guid]::NewGuid().ToString()
+    $start = Invoke-OnDesktop @"
+`$dummy = Start-Process -FilePath ping.exe -ArgumentList '-n 3600 127.0.0.1' -WindowStyle Hidden -PassThru
+New-Item -ItemType Directory -Path '$($Guest.Sessions)' -Force | Out-Null
+`$session = [ordered]@{ pid = `$dummy.Id; sessionId = '$sessionId'; cwd = 'C:\work\demo'; procStart = `$dummy.StartTime.ToFileTimeUtc().ToString(); name = 'demo'; status = 'busy'; entrypoint = 'cli'; updatedAt = 0 }
+[IO.File]::WriteAllText('$($Guest.Sessions)\' + `$dummy.Id + '.json', (`$session | ConvertTo-Json -Compress))
+"@ 60
+    Add-Check 9 'simulated session started' ($start.ExitCode -eq 0) "$($start.Output)".Trim()
+
+    # Mark it critical from the tray menu with real clicks and keys, and leave the menu
+    # open for the screenshot.
+    $ui = (Get-TrayUiScript) + @'
+$ErrorActionPreference = 'Stop'
+Initialize-TrayUi
+"before: $(Wait-TrayTip 'none holding')"
+$null = Open-Menu
+Switch-FirstSession
+"after: $(Wait-TrayTip '1 holding.*Update guard: holding')"
+$null = Open-Menu
+'@
+    $marked = Invoke-OnDesktop $ui 180
+    $tipBefore = ([regex]::Match("$($marked.Output)", '(?m)^before: (.*?)\r?$')).Groups[1].Value.Trim()
+    $tipAfter = ([regex]::Match("$($marked.Output)", '(?m)^after: (.*?)\r?$')).Groups[1].Value.Trim()
+    $mark = Invoke-Guest -ArgumentList "$($Guest.Data)\critical\$sessionId" -ScriptBlock { param($path) Test-Path -LiteralPath $path }
+    Add-Check 9 'session listed, and marked critical from the tray menu' ($marked.ExitCode -eq 0 -and $mark) "mark file $(if ($mark) { 'written' } else { 'missing' }); $("$($marked.Output)".Trim() -replace "`r?`n", ' | ')"
+    Add-Check 9 'icon holding' ($tipBefore -match 'none holding' -and $tipAfter -match '1 holding') "tooltip before [$tipBefore], after [$tipAfter]"
+    $on = Wait-PowerRequest $true 20
+    Add-Check 9 'keep-awake request listed under SYSTEM' ($on.System -match 'powershell\.exe') (($on.System -split "`n" | Where-Object { $_ }) -join ' / ')
+    $a = Wait-ActiveHours { param($a) $a.Backup -and $a.Inside } 20
+    Add-Check 9 'update guard holding' ($tipAfter -match 'Update guard: holding' -and $a.Backup -and $a.Inside) "$(Format-ActiveHours $a); tooltip [$tipAfter]"
+    Save-Screens '9-holding'
+    Invoke-OnDesktop ((Get-TrayUiScript) + "`nSend-Key 0x1B") 60 | Out-Null
+
+    $uninstall = Get-ReadmeCommand '### Uninstall'
+    $result = Invoke-OnDesktop $uninstall 120
+    Add-Check 9 'README uninstall command finished' ($result.Output -match 'has been removed') "$($result.Output)".Trim()
+    Start-Sleep -Seconds 10
+
+    # Every location listed under "What it touches".
+    $left = Invoke-Guest -ArgumentList $script:DesktopUser, $Guest.Programs, $Guest.Data, $Guest.Shortcut -ScriptBlock {
+        param($user, $programs, $data, $shortcut)
+        $sid = (New-Object Security.Principal.NTAccount($user)).Translate([Security.Principal.SecurityIdentifier]).Value
+        $hkcu = "Registry::HKEY_USERS\$sid\Software"
+        $found = @($programs, $data, $shortcut, "$hkcu\Microsoft\Windows\CurrentVersion\Uninstall\agentamph", "$hkcu\agentamph" | Where-Object { Test-Path -LiteralPath $_ })
+        if (Get-ItemProperty -LiteralPath "$hkcu\Microsoft\Windows\CurrentVersion\Run" -Name agentamph -ErrorAction SilentlyContinue) { $found += 'Run value agentamph' }
+        $found += @(Get-ChildItem -LiteralPath "C:\Users\$user\AppData\Local\Temp" -Filter 'agentamph-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        $found
+    }
+    Add-Check 9 'nothing listed under What it touches remains' (@($left).Count -eq 0) $(if ($left) { "left: $($left -join ', ')" } else { 'program folder, data folder, shortcut, Run value, Uninstall key, HKCU\Software\agentamph and %TEMP%\agentamph-* all gone' })
+    $after = Get-GuestActiveHours
+    Add-Check 9 'Active Hours back to their values before the install' ($after.Start -eq $before.Start -and $after.End -eq $before.End -and $after.Smart -eq $before.Smart -and -not $after.Backup) "before $($before.Start)-$($before.End) smart $($before.Smart); after $(Format-ActiveHours $after)"
+    $off = Wait-PowerRequest $false 20
+    Add-Check 9 'keep-awake request gone, tray app stopped' (-not ($off.System -match 'powershell\.exe') -and @(Get-GuestTray).Count -eq 0) $(if ($off.System.Trim()) { $off.System.Trim() } else { 'SYSTEM: None' })
+}
+
 # ---- run -----------------------------------------------------------------------
 
-$order = @(1, 3, 2, 4, 5, 6, 7, 8) | Where-Object { $_ -in $requested }
+$order = @(1, 3, 2, 4, 5, 6, 7, 8, 9) | Where-Object { $_ -in $requested }
 try {
     foreach ($number in $order) {
         try { & "Invoke-Scenario$number" }

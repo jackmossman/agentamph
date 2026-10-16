@@ -26,6 +26,8 @@ function Get-VmPassword {
 }
 
 function Get-AdminCredential {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'The generated password of a throwaway test VM, kept outside the repository.')]
+    param()
     New-Object PSCredential($script:AdminUser, (ConvertTo-SecureString (Get-VmPassword) -AsPlainText -Force))
 }
 
@@ -265,6 +267,112 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 `$bmp.Save('$Path', [System.Drawing.Imaging.ImageFormat]::Png)
 `$g.Dispose(); `$bmp.Dispose()
 "@
+}
+
+# Functions for a desktop task that drives the installed tray app as a user would, with
+# real clicks and keys: Initialize-TrayUi finds the app, shows its icon on the taskbar
+# and clears OneDrive's prompt; Open-Menu, Close-Menu and Switch-FirstSession work the
+# menu; Get-TrayIcon's Name is the icon's tooltip.
+function Get-TrayUiScript {
+    @'
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, UIAutomationClient, UIAutomationTypes
+Add-Type -Namespace AgentamphVm -Name Input -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, System.UIntPtr extra);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, System.UIntPtr extra);
+"@
+$uia = [Windows.Automation.AutomationElement]
+$scope = [Windows.Automation.TreeScope]
+
+function Find-Element($Root, [scriptblock]$Match, [int]$Seconds = 10) {
+    $end = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $end) {
+        foreach ($e in $Root.FindAll($scope::Descendants, [Windows.Automation.Condition]::TrueCondition)) { if (& $Match $e) { return $e } }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'UI element not found'
+}
+function Get-Center($Element) { $r = $Element.Current.BoundingRectangle; @([int]($r.Left + $r.Width / 2), [int]($r.Top + $r.Height / 2)) }
+function Move-PointerAway { [void][AgentamphVm.Input]::SetCursorPos(40, 300) }
+function Invoke-Click([int[]]$At, [switch]$Right) {
+    [void][AgentamphVm.Input]::SetCursorPos($At[0], $At[1]); Start-Sleep -Milliseconds 150
+    $down, $up = if ($Right) { 0x0008, 0x0010 } else { 0x0002, 0x0004 }
+    [AgentamphVm.Input]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60
+    [AgentamphVm.Input]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+}
+function Send-Key([byte]$Key) {
+    [AgentamphVm.Input]::keybd_event($Key, 0, 0, [UIntPtr]::Zero); [AgentamphVm.Input]::keybd_event($Key, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 200
+}
+function Get-TrayIcon {
+    $taskbar = $uia::RootElement.FindFirst($scope::Children, (New-Object Windows.Automation.PropertyCondition($uia::ClassNameProperty, 'Shell_TrayWnd')))
+    Find-Element $taskbar { param($e) $e.Current.Name -like 'agentamph*' }
+}
+# The icon's tooltip once it matches $Pattern (UI Automation can briefly hold a stale
+# copy of the icon), or every tooltip seen when none does within 15 seconds.
+function Wait-TrayTip([string]$Pattern) {
+    $end = (Get-Date).AddSeconds(15)
+    do {
+        $taskbar = $uia::RootElement.FindFirst($scope::Children, (New-Object Windows.Automation.PropertyCondition($uia::ClassNameProperty, 'Shell_TrayWnd')))
+        $tips = @($taskbar.FindAll($scope::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name } | Where-Object { $_ -like 'agentamph*' } | ForEach-Object { $_ -replace '\r?\n', ' / ' })
+        $match = @($tips | Where-Object { $_ -match $Pattern })
+        if ($match) { return $match[0] }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $end)
+    $tips -join ' + '
+}
+# The open menu: the tray app's top-level Windows Forms window.
+function Get-Menu {
+    $end = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $end) {
+        foreach ($e in $uia::RootElement.FindAll($scope::Children, [Windows.Automation.Condition]::TrueCondition)) {
+            if ($e.Current.ProcessId -eq $script:trayPid -and $e.Current.ClassName -like 'WindowsForms10.Window*') { return $e }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'the menu did not open'
+}
+function Open-Menu {
+    Invoke-Click (Get-Center (Get-TrayIcon)) -Right
+    $menu = Get-Menu
+    # Move the pointer off the menu, so no item is highlighted.
+    Move-PointerAway
+    Start-Sleep -Milliseconds 800
+    $menu
+}
+function Close-Menu { Send-Key 0x1B; Start-Sleep -Milliseconds 600 }
+# Toggles the first session in the open menu. UI Automation does not see the menu's
+# items, so this uses the keyboard: Down passes the header and the guard's line.
+function Switch-FirstSession {
+    foreach ($i in 1..3) { Send-Key 0x28 }
+    Send-Key 0x0D
+    Start-Sleep -Milliseconds 2500
+}
+function Initialize-TrayUi {
+    $end = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $script:trayPid = (Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -like '*agentamph\tray.ps1*' } | Select-Object -First 1).ProcessId
+    } until ($script:trayPid -or (Get-Date) -gt $end)
+    if (-not $script:trayPid) { throw 'the tray app is not running' }
+    Start-Sleep -Seconds 3
+    # Windows 11 puts a new icon in the overflow; show it on the taskbar, as a user would.
+    Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' | ForEach-Object {
+        $p = Get-ItemProperty -LiteralPath $_.PSPath
+        if ($p.ExecutablePath -like '*powershell.exe') { Set-ItemProperty -LiteralPath $_.PSPath -Name IsPromoted -Value 1 -Type DWord }
+    }
+    # The checkpoint's desktop shows OneDrive's "Turn On Windows Backup" prompt, which
+    # would cover the menu. Stop OneDrive and close the prompt with its X, anchored to
+    # the bottom-right of the work area; on a desktop without it, the click lands on nothing.
+    Get-Process -Name OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    Invoke-Click @(($area.Right - 41), ($area.Bottom - 279))
+    Move-PointerAway
+    Start-Sleep -Seconds 2
+    # The first open places the menu before it is filled; open it once to settle its size.
+    $null = Open-Menu; Close-Menu
+}
+'@
 }
 
 # Records one check's result and evidence for the report.

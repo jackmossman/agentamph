@@ -1,32 +1,6 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
     $pluginRoot = Join-Path $RepoRoot 'plugin'
-    # Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} with forward slashes on Windows.
-    $hookScript = (Join-Path $pluginRoot 'hooks\mark-critical.cmd').Replace('\', '/')
-
-    # Runs the hook the way its exec-form entry does: cmd.exe /d /c <script>, with the
-    # hook input on stdin. $Environment adds or replaces variables for the child.
-    function Invoke-Hook([string]$Json, [hashtable]$Environment = @{}) {
-        $info = New-Object Diagnostics.ProcessStartInfo
-        $info.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
-        $info.Arguments = "/d /c $hookScript"
-        $info.UseShellExecute = $false
-        $info.RedirectStandardInput = $true
-        $info.RedirectStandardOutput = $true
-        $info.RedirectStandardError = $true
-        foreach ($name in $Environment.Keys) { $info.EnvironmentVariables[$name] = $Environment[$name] }
-        $process = [Diagnostics.Process]::Start($info)
-        $process.StandardInput.Write($Json)
-        $process.StandardInput.Close()
-        $out = $process.StandardOutput.ReadToEnd()
-        $err = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $out; Error = $err }
-    }
-
-    function New-HookInput([string]$SessionId, [string]$Prompt) {
-        @{ session_id = $SessionId; hook_event_name = 'UserPromptSubmit'; prompt = $Prompt } | ConvertTo-Json -Compress
-    }
 }
 
 Describe 'plugin manifests' {

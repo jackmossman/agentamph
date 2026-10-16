@@ -1,0 +1,62 @@
+name: Bug report
+description: Something agentamph does wrong, or doesn't do.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. To report a security problem, use private vulnerability reporting instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a Claude Code session in ...
+        2. Mark it critical from the tray menu
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: agentamph version
+      description: Shown at the top of the tray menu.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: From Settings > System > About, or `winver`.
+      placeholder: Windows 11 Pro 24H2 (26100.xxxx)
+    validations:
+      required: true
+  - type: dropdown
+    id: entrypoint
+    attributes:
+      label: How you run Claude Code
+      multiple: true
+      options:
+        - CLI
+        - VS Code extension
+        - Other
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed agentamph
+      options:
+        - One-line command
+        - Release zip
+        - From a clone
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The end of `%LOCALAPPDATA%\agentamph\tray.log`, if it shows anything relevant. It holds no prompt text.
+      render: text

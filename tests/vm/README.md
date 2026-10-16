@@ -67,8 +67,22 @@ powershell -ExecutionPolicy Bypass -File tests\vm\Invoke-VmTests.ps1 -Scenario 1
 | 6 | Uninstall through the Apps & Features entry's `UninstallString`, as Settings runs it; nothing may remain. |
 | 7 | The Pester suite, run inside the VM as `tester` after installing Pester for that user. |
 | 8 | Update guard, from the `pending-restart` checkpoint. While a critical session holds, Active Hours follow the clock, and Windows does not restart at 02:00 on three nights. Once the session ends, `tester`'s own Active Hours come back and Windows restarts for the update the next night. Takes about 30 minutes. |
+| 9 | Fresh machine, following only the README. It runs the README's install command, which needs a published release of this version. It simulates a session and marks it critical from the tray menu with real clicks and keys. It checks the icon, the keep-awake request and the update guard hold, then runs the README's uninstall command. Afterwards nothing listed under "What it touches" may remain, and Active Hours must be back to their old values. |
 
 Each scenario that installs starts by restoring the `clean` checkpoint (5 seconds, straight back to `tester`'s desktop). The VM is left in its last state afterwards, so you can look at it in Hyper-V Manager; the next run restores `clean` again.
+
+## Make the README's GIF
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\vm\New-ReadmeGif.ps1
+```
+
+This writes `docs\tray.gif`. Starting from `clean`, it:
+1. installs agentamph as `tester` and simulates two sessions;
+2. drives the tray menu with real clicks and keys: it marks one session critical, then unmarks it;
+3. screenshots each state, and assembles the GIF on the host with GDI+.
+
+It needs no tools beyond Windows. Run it again when the menu or the icon changes.
 
 ## Read the report
 
