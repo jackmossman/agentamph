@@ -1,11 +1,12 @@
 # agentamph tray app: lists Claude Code sessions, lets the user mark them critical,
-# and keeps Windows awake according to the chosen selector and mode.
+# keeps Windows awake according to the chosen selector and mode, and holds off Windows
+# Update restarts while it does.
 # Runs under Windows PowerShell 5.1. Launch hidden; see scripts\start-tray.ps1.
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
-foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons', 'Startup') {
+foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons', 'Startup', 'UpdateGuard') {
     . (Join-Path $PSScriptRoot "lib\$lib.ps1")
 }
 Add-Type -AssemblyName System.Windows.Forms
@@ -61,6 +62,8 @@ $script:lastSignature = ''
 $script:lastFullScan = [datetime]::MinValue
 $script:lastHoldKey = ''
 $script:iconHandle = [IntPtr]::Zero
+$script:guard = New-UpdateGuardState
+$script:rebootWarned = $false
 
 $script:notifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -81,6 +84,14 @@ function Get-ModeLabel {
     "$selector, $mode"
 }
 
+function Get-GuardLabel {
+    switch ($script:guard.State) {
+        'holding' { 'Update guard: holding' }
+        'unavailable' { 'Update guard: unavailable' }
+        default { 'Update guard: off' }
+    }
+}
+
 function Update-TrayIcon {
     $count = Get-SessionCount $script:holding
     $handle = New-AgentampIconHandle ($count -gt 0) $count ([System.Windows.Forms.SystemInformation]::SmallIconSize.Width)
@@ -91,6 +102,12 @@ function Update-TrayIcon {
     $text = if ($script:unrecognised) { "agentamph: session format not recognised" }
             elseif ($count -gt 0) { "agentamph: $count holding ($(Get-ModeLabel))" }
             else { "agentamph: none holding ($(Get-ModeLabel))" }
+    if ($script:guard.State -ne 'off') {
+        $guardLine = Get-GuardLabel
+        # The tooltip holds 63 characters; drop the mode before the guard's state.
+        if ($text.Length + 1 + $guardLine.Length -gt 63) { $text = $text -replace ' \(.*\)$', '' }
+        $text = "$text`n$guardLine"
+    }
     if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
     $script:notifyIcon.Text = $text
 }
@@ -114,11 +131,31 @@ function Invoke-Refresh([bool]$Force) {
         -Mode $script:settings.Mode -GraceMinutes $script:settings.GraceMinutes -LastBusy $script:lastBusy -Now $now
     $holdNow = @($script:holding).Count -gt 0
     Set-KeepAwake $holdNow $script:settings.KeepDisplayOn
+    Invoke-UpdateGuard $holdNow $now
 
-    $holdKey = "$(Get-SessionCount $script:holding)|$($script:unrecognised)|$(Get-ModeLabel)"
+    $holdKey = "$(Get-SessionCount $script:holding)|$($script:unrecognised)|$(Get-ModeLabel)|$($script:guard.State)"
     if ($Force -or $holdKey -ne $script:lastHoldKey) {
         $script:lastHoldKey = $holdKey
         Update-TrayIcon
+    }
+}
+
+function Invoke-UpdateGuard([bool]$Hold, [datetime]$Now) {
+    try {
+        $change = Update-UpdateGuard $script:guard $Hold $script:settings.HoldUpdateRestarts $Now
+        if ($change) { Write-Log "update guard: $change" }
+    } catch { Write-Log "update guard failed: $($_.Exception.Message)" }
+    if (-not $Hold) { $script:rebootWarned = $false; return }
+    if (-not $script:rebootWarned -and $script:guard.State -ne 'off' -and (Test-RebootPending)) {
+        # Once per holding period: a restart past a policy deadline cannot be held off.
+        $script:rebootWarned = $true
+        Write-Log 'update restart pending'
+        $text = if ($script:guard.State -eq 'holding') {
+            'An update is waiting for a restart. Windows will not restart for it while agentamph holds, unless a deadline set by your organization forces it. Restart at a convenient moment.'
+        } else {
+            "An update is waiting for a restart, and agentamph cannot hold it off ($($script:guard.Reason)). Restart at a convenient moment."
+        }
+        $script:notifyIcon.ShowBalloonTip(10000, 'Windows Update restart pending', $text, [System.Windows.Forms.ToolTipIcon]::Warning)
     }
 }
 
@@ -143,6 +180,7 @@ $script:onToggleCritical = {
 $script:onSelector = { param($sender, $e) $script:settings.Selector = [string]$sender.Tag; Save-Settings }
 $script:onMode = { param($sender, $e) $script:settings.Mode = [string]$sender.Tag; Save-Settings }
 $script:onGrace = { param($sender, $e) $script:settings.GraceMinutes = [int]$sender.Tag; Save-Settings }
+$script:onUpdateGuard = { param($sender, $e) $script:settings.HoldUpdateRestarts = -not $script:settings.HoldUpdateRestarts; Save-Settings }
 $script:onDisplay = { param($sender, $e) $script:settings.KeepDisplayOn = -not $script:settings.KeepDisplayOn; Save-Settings }
 $script:onStartAtLogin = {
     param($sender, $e)
@@ -168,6 +206,11 @@ function Update-Menu {
     $header = New-MenuItem "agentamph $($script:AgentampVersion): $count holding" $null $false $null
     $header.Enabled = $false
     [void]$script:menu.Items.Add($header)
+    $guardText = Get-GuardLabel
+    if ($script:guard.State -eq 'unavailable' -and $script:guard.Reason) { $guardText += " ($($script:guard.Reason))" }
+    $guardItem = New-MenuItem $guardText $null $false $null
+    $guardItem.Enabled = $false
+    [void]$script:menu.Items.Add($guardItem)
     if ($script:unrecognised) {
         $warn = New-MenuItem 'Claude session format not recognised' $null $false $null
         $warn.Enabled = $false
@@ -204,6 +247,7 @@ function Update-Menu {
     [void]$script:menu.Items.Add($modeMenu)
     [void]$script:menu.Items.Add($graceMenu)
     [void]$script:menu.Items.Add((New-MenuItem 'Keep display on' $null $script:settings.KeepDisplayOn $script:onDisplay))
+    [void]$script:menu.Items.Add((New-MenuItem 'Hold off update restarts' $null $script:settings.HoldUpdateRestarts $script:onUpdateGuard))
     [void]$script:menu.Items.Add((New-MenuItem 'Start at login' $null (Test-StartAtLogin) $script:onStartAtLogin))
     [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     [void]$script:menu.Items.Add((New-MenuItem 'Exit' $null $false $script:onExit))
@@ -212,6 +256,7 @@ function Update-Menu {
 function Stop-Tray {
     try { $script:timer.Stop() } catch { }
     Set-KeepAwake $false $false
+    Invoke-UpdateGuard $false (Get-Date)
     $script:notifyIcon.Visible = $false
     $script:notifyIcon.Dispose()
     Remove-IconHandle $script:iconHandle
@@ -242,6 +287,7 @@ try {
 } catch {
     Write-Log "fatal: $($_.Exception.Message)"
     Set-KeepAwake $false $false
+    try { Restore-UpdateGuardBackup } catch { }
 } finally {
     Write-Log 'stopped'
     $script:exitEvent.Dispose()

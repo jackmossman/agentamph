@@ -1,7 +1,8 @@
 # Runs the VM test scenarios against the Hyper-V VM "agentamph-test" (build it once with
 # New-VmTemplate.ps1). Each scenario installs agentamph the way a user would, as the
 # standard user "tester", and checks what the development machine cannot: a first
-# install with nothing preinstalled, signing in, no console windows, uninstalling.
+# install with nothing preinstalled, signing in, no console windows, uninstalling, and
+# holding off a real Windows Update restart.
 #
 #   powershell -ExecutionPolicy Bypass -File tests\vm\Invoke-VmTests.ps1 [-Scenario 1,3]
 #
@@ -13,7 +14,7 @@
 
 param(
     # Strings, split on commas: under -File, "-Scenario 1,3" arrives as one string.
-    [string[]]$Scenario = @('1', '2', '3', '4', '5', '6', '7'),
+    [string[]]$Scenario = @('1', '2', '3', '4', '5', '6', '7', '8'),
     [ValidateSet('None', 'NoHeadless', 'UninstallKeepsRun')][string]$Fault = 'None'
 )
 
@@ -21,8 +22,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VmLib.ps1')
 Assert-VmPrerequisites -NeedCheckpoint
 $requested = @($Scenario -split ',' | Where-Object { $_.Trim() } | ForEach-Object { [int]$_.Trim() })
-$unknown = @($requested | Where-Object { $_ -notin 1..7 })
-if ($unknown) { throw "No scenario $($unknown -join ', '). Scenarios are 1 to 7." }
+$unknown = @($requested | Where-Object { $_ -notin 1..8 })
+if ($unknown) { throw "No scenario $($unknown -join ', '). Scenarios are 1 to 8." }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $script:ResultsDir = Join-Path $PSScriptRoot ("results\" + (Get-Date).ToString('yyyyMMdd-HHmmss'))
@@ -165,6 +166,23 @@ exit `$LASTEXITCODE
     Add-Check $Scenario 'installer finished' ($result.ExitCode -eq 0) (($result.Output -split "`r?`n" | Where-Object { $_ }) -join ' / ')
 }
 
+# Simulates a Claude Code session marked critical, as tester: a session file for a
+# long-running ping.exe and a critical mark. Returns ping's process id; stopping it
+# ends the session.
+function New-GuestCriticalSession {
+    $sessionId = [guid]::NewGuid().ToString()
+    $start = Invoke-OnDesktop @"
+`$dummy = Start-Process -FilePath ping.exe -ArgumentList '-n 3600 127.0.0.1' -WindowStyle Hidden -PassThru
+New-Item -ItemType Directory -Path '$($Guest.Sessions)' -Force | Out-Null
+`$session = [ordered]@{ pid = `$dummy.Id; sessionId = '$sessionId'; cwd = 'C:\work\demo'; procStart = `$dummy.StartTime.ToFileTimeUtc().ToString(); name = 'demo'; status = 'idle'; entrypoint = 'cli'; updatedAt = 0 }
+[IO.File]::WriteAllText('$($Guest.Sessions)\' + `$dummy.Id + '.json', (`$session | ConvertTo-Json -Compress))
+New-Item -ItemType Directory -Path '$($Guest.Data)\critical' -Force | Out-Null
+[IO.File]::WriteAllText('$($Guest.Data)\critical\$sessionId', (Get-Date).ToUniversalTime().ToString('o'))
+`$dummy.Id
+"@ 60
+    [int]($start.Output.Trim() -split "`r?`n")[-1]
+}
+
 function Start-Scenario([int]$Number, [string]$Title, [switch]$ContinueFrom) {
     Write-VmLog "scenario ${Number}: $Title"
     $script:LastScenario = $Number
@@ -257,17 +275,7 @@ function Invoke-Scenario5 {
     Start-Scenario 5 'keep-awake with a simulated critical session'
     Restore-CleanVm
     Install-FromZip 5
-    $sessionId = [guid]::NewGuid().ToString()
-    $start = Invoke-OnDesktop @"
-`$dummy = Start-Process -FilePath ping.exe -ArgumentList '-n 900 127.0.0.1' -WindowStyle Hidden -PassThru
-New-Item -ItemType Directory -Path '$($Guest.Sessions)' -Force | Out-Null
-`$session = [ordered]@{ pid = `$dummy.Id; sessionId = '$sessionId'; cwd = 'C:\work\demo'; procStart = `$dummy.StartTime.ToFileTimeUtc().ToString(); name = 'demo'; status = 'idle'; entrypoint = 'cli'; updatedAt = 0 }
-[IO.File]::WriteAllText('$($Guest.Sessions)\' + `$dummy.Id + '.json', (`$session | ConvertTo-Json -Compress))
-New-Item -ItemType Directory -Path '$($Guest.Data)\critical' -Force | Out-Null
-[IO.File]::WriteAllText('$($Guest.Data)\critical\$sessionId', (Get-Date).ToUniversalTime().ToString('o'))
-`$dummy.Id
-"@ 60
-    $dummyId = [int]($start.Output.Trim() -split "`r?`n")[-1]
+    $dummyId = New-GuestCriticalSession
     $on = Wait-PowerRequest $true 20
     Add-Check 5 'critical session holds: app listed under SYSTEM' ($on.System -match 'powershell\.exe') (($on.System -split "`n" | Where-Object { $_ }) -join ' / ')
     Save-Screens '5-holding'
@@ -329,9 +337,121 @@ Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublish
     Add-Check 7 'Pester suite passes as a standard user' ($run.ExitCode -eq 0) $(if ($failures) { "$summary; failed: $failures" } else { $summary })
 }
 
+# Active Hours, read from the guest, plus the update guard's backup in tester's hive.
+function Get-GuestActiveHours {
+    Invoke-Guest -ArgumentList $script:DesktopUser -ScriptBlock {
+        param($user)
+        $ux = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+        $sid = (New-Object Security.Principal.NTAccount($user)).Translate([Security.Principal.SecurityIdentifier]).Value
+        $backup = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$sid\Software\agentamph\UpdateGuard" -ErrorAction SilentlyContinue
+        $hour = (Get-Date).Hour
+        $start = [int]$ux.ActiveHoursStart; $end = [int]$ux.ActiveHoursEnd
+        $inside = if ($start -lt $end) { $hour -ge $start -and $hour -lt $end } else { $hour -ge $start -or $hour -lt $end }
+        # Explicit values: an empty $(...) comes back over PowerShell Direct as a non-null object.
+        $backupText = 'none'
+        if ($backup) { $backupText = "$($backup.ActiveHoursStart)-$($backup.ActiveHoursEnd), smart $($backup.SmartActiveHoursState)" }
+        [pscustomobject]@{
+            Start = $start; End = $end; Smart = [int]$ux.SmartActiveHoursState; Hour = $hour; Inside = $inside
+            Time = (Get-Date).ToString('MM-dd HH:mm'); Backup = [bool]$backup; BackupText = $backupText
+        }
+    }
+}
+
+function Format-ActiveHours($a) { "guest $($a.Time): Active Hours $($a.Start)-$($a.End), smart $($a.Smart); backup $($a.BackupText)" }
+
+function Wait-ActiveHours([scriptblock]$Condition, [int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $a = Get-GuestActiveHours
+        if (& $Condition $a) { return $a }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    $a
+}
+
+function Get-PendingWarnings {
+    Invoke-Guest -ArgumentList $Guest.Data -ScriptBlock { param($data) @(Get-Content "$data\tray.log" | Where-Object { $_ -match 'update restart pending' }).Count }
+}
+
+# Moves the guest clock forward to $Target in steps of at most 15 hours, giving the app a
+# few seconds after each step, as hours passing would. The guard's 18-hour window always
+# reaches 17 hours ahead, so no step leaves it.
+function Step-GuestClock([datetime]$Target) {
+    while ($true) {
+        $now = Invoke-Guest { Get-Date }
+        if ($now -ge $Target.AddMinutes(-1)) { return }
+        $next = if (($Target - $now).TotalHours -gt 15) { $now.AddHours(15) } else { $Target }
+        Set-GuestClock $next
+        Start-Sleep -Seconds 5
+    }
+}
+
+function Invoke-Scenario8 {
+    Start-Scenario 8 'update guard holds off a pending update restart'
+    if (-not (Get-VMSnapshot -VMName $script:VmName -Name $script:PendingRestartCheckpoint -ErrorAction SilentlyContinue)) {
+        throw "The VM has no '$($script:PendingRestartCheckpoint)' checkpoint. Build it with tests\vm\New-PendingRestartCheckpoint.ps1."
+    }
+    Restore-CleanVm $script:PendingRestartCheckpoint
+    Enable-GuestClockControl
+    try {
+        $build = Invoke-Guest { "$([Environment]::OSVersion.Version.Build).$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR)" }
+        $pending = Invoke-Guest { Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' }
+        Add-Check 8 'an update restart is pending' $pending "build $build"
+
+        # tester's own Active Hours: 6:00 to 0:00, so the night is outside them and
+        # Windows restarts then unless the guard holds.
+        Invoke-OnDesktop @'
+$key = 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+Set-ItemProperty $key ActiveHoursStart 6 -Type DWord; Set-ItemProperty $key ActiveHoursEnd 0 -Type DWord; Set-ItemProperty $key SmartActiveHoursState 0 -Type DWord
+'@ 60 | Out-Null
+        Install-FromZip 8
+        $boot = Get-GuestBootTime
+
+        $dummyId = New-GuestCriticalSession
+        $a = Wait-ActiveHours { param($a) $a.Inside -and $a.Smart -eq 0 -and $a.Backup } 5
+        $ok = $a.Inside -and $a.Start -eq (($a.Hour + 23) % 24) -and $a.Backup -and $a.BackupText -eq '6-0, smart 0'
+        Add-Check 8 'holding: Active Hours contain the current time within 5 s, originals saved' $ok (Format-ActiveHours $a)
+        Invoke-OnDesktop 'Start-Process "ms-settings:windowsupdate-options"; Start-Sleep 8' 60 | Out-Null
+        Save-Screens '8-settings-while-holding'
+        Invoke-OnDesktop 'Get-Process SystemSettings -ErrorAction SilentlyContinue | Stop-Process -Force' 60 | Out-Null
+        $warnings = Get-PendingWarnings
+        Add-Check 8 'pending restart warned once' ($warnings -eq 1) "$warnings 'update restart pending' entries in tray.log"
+
+        # 02:00 on three nights while the session holds; the guard's window moves with the clock.
+        $restarted = $false
+        foreach ($days in 1, 1, 2) {
+            Step-GuestClock ((Invoke-Guest { Get-Date }).Date.AddDays($days).AddHours(2))
+            $a = Get-GuestActiveHours
+            Write-VmLog "  $(Format-ActiveHours $a)"
+            $restarted = Wait-GuestRestart $boot 5
+            if ($restarted) { break }
+        }
+        Add-Check 8 'no restart while holding, at 02:00 on three nights' (-not $restarted -and $a.Inside -and $a.Start -eq 1) "last: $(Format-ActiveHours $a)"
+        if ($restarted) { return }
+        $warnings = Get-PendingWarnings
+        Add-Check 8 'still warned only once in the holding period' ($warnings -eq 1) "$warnings entries"
+
+        # The session ends: the guard puts tester's Active Hours back.
+        Invoke-Guest -ArgumentList $dummyId -ScriptBlock { param($id) Stop-Process -Id $id -Force }
+        $a = Wait-ActiveHours { param($a) -not $a.Backup } 15
+        Add-Check 8 'released: tester''s Active Hours restored, backup gone' ($a.Start -eq 6 -and $a.End -eq 0 -and $a.Smart -eq 0 -and -not $a.Backup) (Format-ActiveHours $a)
+
+        # The next night, Windows restarts as it would have without agentamph.
+        Set-GuestClock ((Invoke-Guest { Get-Date }).Date.AddDays(1).AddHours(2))
+        $restarted = Wait-GuestRestart $boot 10
+        $evidence = 'no restart within 10 minutes'
+        if ($restarted) {
+            $evidence = Invoke-Guest { $e = Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 1074 } -MaxEvents 1; "$($e.TimeCreated): $(($e.Message -split "`n")[0].Trim())" }
+        }
+        Add-Check 8 'after release, Windows restarts for the update at night' ($restarted -and $evidence -match 'MoUsoCoreWorker') $evidence
+    } finally {
+        Undo-GuestClockControl
+    }
+}
+
 # ---- run -----------------------------------------------------------------------
 
-$order = @(1, 3, 2, 4, 5, 6, 7) | Where-Object { $_ -in $requested }
+$order = @(1, 3, 2, 4, 5, 6, 7, 8) | Where-Object { $_ -in $requested }
 try {
     foreach ($number in $order) {
         try { & "Invoke-Scenario$number" }

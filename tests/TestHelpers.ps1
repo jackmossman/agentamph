@@ -2,7 +2,7 @@
 
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:FixtureSessions = Join-Path $PSScriptRoot 'fixtures\sessions'
-foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons', 'Startup') {
+foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons', 'Startup', 'UpdateGuard') {
     . (Join-Path $script:RepoRoot "src\lib\$lib.ps1")
 }
 

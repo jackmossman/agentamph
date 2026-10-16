@@ -4,6 +4,7 @@
 
 $script:VmName = 'agentamph-test'
 $script:CleanCheckpoint = 'clean'
+$script:PendingRestartCheckpoint = 'pending-restart'
 $script:AdminUser = 'amphadmin'
 $script:DesktopUser = 'tester'
 $script:Exchange = 'C:\exchange'
@@ -86,18 +87,54 @@ function Initialize-GuestExchange {
     }
 }
 
-# Restores the clean checkpoint, resumes the VM, and sets its clock from the host,
-# because a checkpoint brings back the clock as it was when taken.
-function Restore-CleanVm {
-    Write-VmLog "restoring checkpoint '$($script:CleanCheckpoint)'"
+# Restores a checkpoint (by default the clean one), resumes the VM, and sets its clock
+# from the host, because a checkpoint brings back the clock as it was when taken.
+function Restore-CleanVm([string]$Checkpoint = $script:CleanCheckpoint) {
+    Write-VmLog "restoring checkpoint '$Checkpoint'"
     Disconnect-Guest
-    Restore-VMSnapshot -VMName $script:VmName -Name $script:CleanCheckpoint -Confirm:$false
+    Restore-VMSnapshot -VMName $script:VmName -Name $Checkpoint -Confirm:$false
     if ((Get-VM -Name $script:VmName).State -ne 'Running') { Start-VM -Name $script:VmName }
     Connect-Guest | Out-Null
     $now = Get-Date
     Invoke-Guest -ArgumentList $now -ScriptBlock { param($t) Set-Date -Date $t | Out-Null }
     Wait-GuestDesktop
     Initialize-GuestExchange
+}
+
+# Lets a test move the guest's clock: turns off Hyper-V time sync and stops Windows Time
+# in the guest, which otherwise put the clock back within minutes. Undo-GuestClockControl
+# turns time sync back on; the guest itself is reset by the next checkpoint restore.
+function Enable-GuestClockControl {
+    Disable-VMIntegrationService -VMName $script:VmName -Name 'Time Synchronization'
+    Invoke-Guest { Stop-Service w32time -Force; Set-Service w32time -StartupType Disabled }
+}
+
+function Undo-GuestClockControl {
+    Enable-VMIntegrationService -VMName $script:VmName -Name 'Time Synchronization'
+}
+
+function Set-GuestClock([datetime]$Time) {
+    for ($k = 0; $k -lt 5; $k++) {
+        Invoke-Guest -ArgumentList $Time -ScriptBlock { param($t) Set-Date -Date $t | Out-Null }
+        Start-Sleep -Seconds 2
+        $now = Invoke-Guest { Get-Date }
+        if ([math]::Abs(($now - $Time).TotalSeconds) -lt 60) { return }
+    }
+    throw "The guest clock could not be set to $Time."
+}
+
+function Get-GuestBootTime { Invoke-Guest { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime } }
+
+# Watches for the guest restarting by itself. Returns $true when its boot time changes.
+function Wait-GuestRestart($BootTime, [int]$Minutes) {
+    $deadline = (Get-Date).AddMinutes($Minutes)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 15
+        try { if ((Get-GuestBootTime) -ne $BootTime) { return $true } } catch { Disconnect-Guest }
+    }
+    # A guest in the middle of restarting cannot answer; wait for its desktop, then compare.
+    Wait-GuestDesktop
+    (Get-GuestBootTime) -ne $BootTime
 }
 
 # Restarts the guest from inside, then waits for the desktop user to be signed in again.

@@ -3,7 +3,7 @@
 $script:GraceChoices = @(0, 2, 5, 10)
 
 function Get-DefaultSettings {
-    [pscustomobject]@{ Selector = 'Critical'; Mode = 'UntilClosed'; GraceMinutes = 2; KeepDisplayOn = $false }
+    [pscustomobject]@{ Selector = 'Critical'; Mode = 'UntilClosed'; GraceMinutes = 2; KeepDisplayOn = $false; HoldUpdateRestarts = $true }
 }
 
 function Read-AgentampSettings([string]$Path = (Get-SettingsPath)) {
@@ -20,6 +20,8 @@ function Read-AgentampSettings([string]$Path = (Get-SettingsPath)) {
     if ($null -ne $grace -and ($grace -as [int]) -in $script:GraceChoices) { $settings.GraceMinutes = [int]$grace }
     $display = Get-JsonValue $json 'KeepDisplayOn'
     if ($display -is [bool]) { $settings.KeepDisplayOn = $display }
+    $updates = Get-JsonValue $json 'HoldUpdateRestarts'
+    if ($updates -is [bool]) { $settings.HoldUpdateRestarts = $updates }
     $settings
 }
 
