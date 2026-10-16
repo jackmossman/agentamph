@@ -4,6 +4,9 @@ plans/
 # Release zips built by scripts/build-release.ps1.
 dist/
 
+# VM test reports written by tests/vm/Invoke-VmTests.ps1.
+tests/vm/results/
+
 # OS and editor clutter.
 Thumbs.db
 Desktop.ini
