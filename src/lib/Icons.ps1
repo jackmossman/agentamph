@@ -21,8 +21,8 @@ function New-CapsulePath([System.Drawing.RectangleF]$Rect) {
 
 function Get-CountText([int]$Count) { if ($Count -gt 9) { '9+' } else { [string]$Count } }
 
-# Returns a handle to a new icon. The caller owns it and frees it with Remove-IconHandle.
-function New-AgentampIconHandle([bool]$Holding, [int]$Count, [int]$Size = 16) {
+# Returns a new bitmap of the icon. The caller disposes it.
+function New-AgentampIconBitmap([bool]$Holding, [int]$Count, [int]$Size = 16) {
     $bitmap = New-Object System.Drawing.Bitmap($Size, $Size)
     $g = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
@@ -51,10 +51,41 @@ function New-AgentampIconHandle([bool]$Holding, [int]$Count, [int]$Size = 16) {
             $g.DrawLine($pen, $mid, $rect.Y, $mid, $rect.Bottom)
             $pen.Dispose(); $path.Dispose()
         }
-        $bitmap.GetHicon()
     } finally {
-        $g.Dispose(); $bitmap.Dispose()
+        $g.Dispose()
     }
+    $bitmap
+}
+
+# Returns a handle to a new icon. The caller owns it and frees it with Remove-IconHandle.
+function New-AgentampIconHandle([bool]$Holding, [int]$Count, [int]$Size = 16) {
+    $bitmap = New-AgentampIconBitmap $Holding $Count $Size
+    try { $bitmap.GetHicon() } finally { $bitmap.Dispose() }
+}
+
+# Writes an .ico file holding the icon at several sizes, each frame stored as PNG,
+# for the Start Menu shortcut and the Apps & Features entry.
+function Save-AgentampIconFile([string]$Path, [bool]$Holding = $true, [int]$Count = 1, [int[]]$Sizes = @(16, 32, 48, 256)) {
+    $frames = foreach ($size in $Sizes) {
+        $bitmap = New-AgentampIconBitmap $Holding $Count $size
+        $stream = New-Object IO.MemoryStream
+        try { $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); , $stream.ToArray() } finally { $stream.Dispose(); $bitmap.Dispose() }
+    }
+    $out = New-Object IO.MemoryStream
+    $writer = New-Object IO.BinaryWriter($out)
+    $writer.Write([uint16]0); $writer.Write([uint16]1); $writer.Write([uint16]$Sizes.Count)
+    $offset = 6 + 16 * $Sizes.Count
+    for ($i = 0; $i -lt $Sizes.Count; $i++) {
+        $dimension = if ($Sizes[$i] -ge 256) { 0 } else { $Sizes[$i] }
+        $writer.Write([byte]$dimension); $writer.Write([byte]$dimension); $writer.Write([byte]0); $writer.Write([byte]0)
+        $writer.Write([uint16]1); $writer.Write([uint16]32)
+        $writer.Write([uint32]$frames[$i].Length); $writer.Write([uint32]$offset)
+        $offset += $frames[$i].Length
+    }
+    foreach ($frame in $frames) { $writer.Write([byte[]]$frame) }
+    $writer.Flush()
+    [IO.File]::WriteAllBytes($Path, $out.ToArray())
+    $writer.Dispose()
 }
 
 function Remove-IconHandle([IntPtr]$Handle) {

@@ -1,0 +1,12 @@
+{
+  "name": "agentamph",
+  "description": "agentamph: keep Windows awake for the Claude Code sessions you choose.",
+  "owner": { "name": "Jack Mossman" },
+  "plugins": [
+    {
+      "name": "agentamph",
+      "source": "./plugin",
+      "description": "Start a prompt with \"this session is critical\" to mark the session critical in the agentamph tray app."
+    }
+  ]
+}

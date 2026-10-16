@@ -1,6 +1,9 @@
 # Plans are private working notes.
 plans/
 
+# Release zips built by scripts/build-release.ps1.
+dist/
+
 # OS and editor clutter.
 Thumbs.db
 Desktop.ini

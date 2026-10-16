@@ -1,6 +1,9 @@
 # Store and check out every text file with LF, overriding core.autocrlf.
 * text=auto eol=lf
 
+# cmd.exe misreads batch files with LF-only line endings.
+*.cmd text eol=crlf
+
 # Binary files.
 *.png binary
 *.gif binary

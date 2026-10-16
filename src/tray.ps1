@@ -5,7 +5,7 @@
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
-foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons') {
+foreach ($lib in 'Paths', 'Sessions', 'Marks', 'Hold', 'Settings', 'Power', 'Icons', 'Startup') {
     . (Join-Path $PSScriptRoot "lib\$lib.ps1")
 }
 Add-Type -AssemblyName System.Windows.Forms
@@ -13,10 +13,13 @@ Add-Type -AssemblyName System.Windows.Forms
 # AGENTAMPH_HARNESS loads the app without the single-instance lock or the message
 # loop, so a test script can drive the real menu and icon.
 $script:harness = [bool]$env:AGENTAMPH_HARNESS
+$script:exitEvent = $null
 if (-not $script:harness) {
     $createdNew = $false
-    $script:mutex = New-Object System.Threading.Mutex($true, 'Local\agentamph-tray', [ref]$createdNew)
+    $script:mutex = New-Object System.Threading.Mutex($true, $script:TrayMutexName, [ref]$createdNew)
     if (-not $createdNew) { exit 0 }
+    # An installer or uninstaller sets this event to ask the running app to exit.
+    $script:exitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, $script:TrayExitEventName)
 }
 
 Initialize-AgentampHome
@@ -141,6 +144,10 @@ $script:onSelector = { param($sender, $e) $script:settings.Selector = [string]$s
 $script:onMode = { param($sender, $e) $script:settings.Mode = [string]$sender.Tag; Save-Settings }
 $script:onGrace = { param($sender, $e) $script:settings.GraceMinutes = [int]$sender.Tag; Save-Settings }
 $script:onDisplay = { param($sender, $e) $script:settings.KeepDisplayOn = -not $script:settings.KeepDisplayOn; Save-Settings }
+$script:onStartAtLogin = {
+    param($sender, $e)
+    try { Set-StartAtLogin (-not (Test-StartAtLogin)) (Join-Path $PSScriptRoot 'tray.ps1') } catch { Write-Log "start at login failed: $($_.Exception.Message)" }
+}
 $script:onExit = { param($sender, $e) Stop-Tray }
 
 function Get-SessionLabel($Session) {
@@ -158,7 +165,7 @@ function Get-SessionLabel($Session) {
 function Update-Menu {
     $script:menu.Items.Clear()
     $count = Get-SessionCount $script:holding
-    $header = New-MenuItem "agentamph: $count holding" $null $false $null
+    $header = New-MenuItem "agentamph $($script:AgentampVersion): $count holding" $null $false $null
     $header.Enabled = $false
     [void]$script:menu.Items.Add($header)
     if ($script:unrecognised) {
@@ -197,6 +204,7 @@ function Update-Menu {
     [void]$script:menu.Items.Add($modeMenu)
     [void]$script:menu.Items.Add($graceMenu)
     [void]$script:menu.Items.Add((New-MenuItem 'Keep display on' $null $script:settings.KeepDisplayOn $script:onDisplay))
+    [void]$script:menu.Items.Add((New-MenuItem 'Start at login' $null (Test-StartAtLogin) $script:onStartAtLogin))
     [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     [void]$script:menu.Items.Add((New-MenuItem 'Exit' $null $false $script:onExit))
 }
@@ -219,6 +227,7 @@ $script:menu.add_Opening({
 $script:timer = New-Object System.Windows.Forms.Timer
 $script:timer.Interval = 1000
 $script:timer.add_Tick({
+    if ($script:exitEvent -and $script:exitEvent.WaitOne(0)) { Write-Log 'asked to exit'; Stop-Tray; return }
     try { Invoke-Refresh $false } catch { Write-Log "refresh failed: $($_.Exception.Message)" }
 })
 
@@ -235,6 +244,7 @@ try {
     Set-KeepAwake $false $false
 } finally {
     Write-Log 'stopped'
+    $script:exitEvent.Dispose()
     $script:mutex.ReleaseMutex()
     $script:mutex.Dispose()
 }

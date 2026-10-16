@@ -1,0 +1,17 @@
+{
+  "description": "Marks the session critical in the agentamph tray app when the first line of a prompt contains the trigger phrase.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd.exe",
+            "args": ["/d", "/c", "${CLAUDE_PLUGIN_ROOT}/hooks/mark-critical.cmd"],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
